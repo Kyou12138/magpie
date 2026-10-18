@@ -51,8 +51,8 @@ func cachedCopilot(ctx context.Context, token string, fetch func(context.Context
 					copilotSessions[token] = r.s
 				}
 			}
-			copilotMu.Unlock()
 			close(r.done)
+			copilotMu.Unlock()
 		}()
 	}
 	copilotMu.Unlock()

@@ -46,6 +46,7 @@ func lapsedCopilot(t *testing.T) *atomic.Int32 {
 func resetCopilotState() {
 	copilotMu.Lock()
 	copilotSessions = map[string]copilotSession{}
+	copilotRefreshes = map[string]*copilotRefresh{}
 	copilotMu.Unlock()
 	copilotRefusals.Lock()
 	copilotRefusals.at, copilotRefusals.status = map[string]time.Time{}, map[string]int{}

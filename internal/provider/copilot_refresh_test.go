@@ -71,6 +71,12 @@ func TestCopilotRefreshLeavesOtherAccountsReadable(t *testing.T) {
 		go func() { _, err := refresh(t.Context(), copilotApp{Token: "held"}); held <- err }()
 		synctest.Wait()
 		defer func() { close(release); synctest.Wait(); <-held }()
+		// Mutex waits are not durable in synctest. Check the held lock
+		// before starting readers so the regression fails rather than hangs.
+		if !copilotMu.TryLock() {
+			t.Fatal("session cache is locked while another account refreshes")
+		}
+		copilotMu.Unlock()
 		for _, reader := range []struct {
 			name string
 			call func(context.Context, copilotApp) (copilotSession, error)
@@ -112,11 +118,20 @@ func TestCopilotRefreshSharesResult(t *testing.T) {
 					return res, nil
 				})
 				done := make(chan copilotRefreshResult, 16)
-				for range 16 {
-					go func() {
-						s, err := refresh(timeoutCtx(t, 2*time.Minute), copilotApp{Token: "shared"})
-						done <- copilotRefreshResult{s, err}
-					}()
+				run := func() {
+					s, err := refresh(t.Context(), copilotApp{Token: "shared"})
+					done <- copilotRefreshResult{s, err}
+				}
+				go run()
+				synctest.Wait()
+				if !copilotMu.TryLock() {
+					close(release)
+					synctest.Wait()
+					t.Fatal("session cache is locked while a shared exchange runs")
+				}
+				copilotMu.Unlock()
+				for range 15 {
+					go run()
 				}
 				synctest.Wait()
 				if n := calls.Load(); n != 1 {
@@ -178,6 +193,12 @@ func TestCopilotRefreshCancellationIsPerCaller(t *testing.T) {
 		leader, follower, kept := make(chan error, 1), make(chan error, 1), make(chan error, 1)
 		go func() { _, err := refresh(ctx, copilotApp{Token: "shared"}); leader <- err }()
 		synctest.Wait()
+		if !copilotMu.TryLock() {
+			close(release)
+			synctest.Wait()
+			t.Fatal("session cache is locked while callers need to join or cancel")
+		}
+		copilotMu.Unlock()
 		waitCtx, stop := context.WithCancel(ctx)
 		defer stop()
 		go func() { _, err := refresh(waitCtx, copilotApp{Token: "shared"}); follower <- err }()
@@ -214,6 +235,46 @@ func TestCopilotRefreshCancellationIsPerCaller(t *testing.T) {
 	})
 }
 
+func TestCopilotRefreshResetDropsPendingResult(t *testing.T) {
+	copilotRefreshModes(t, func(t *testing.T, refresh func(context.Context, copilotApp) (copilotSession, error)) {
+		release := make(chan struct{})
+		var calls atomic.Int32
+		copilotRefreshTransport(t, func(r *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				<-release
+			}
+			return copilotRefreshReply(r), nil
+		})
+		done := make(chan error, 1)
+		go func() { _, err := refresh(t.Context(), copilotApp{Token: "reset"}); done <- err }()
+		synctest.Wait()
+		if !copilotMu.TryLock() {
+			close(release)
+			synctest.Wait()
+			t.Fatal("session cache is locked while resetting a pending refresh")
+		}
+		copilotMu.Unlock()
+		ForgetCopilotForTest()
+		close(release)
+		synctest.Wait()
+		if err := <-done; err != nil {
+			t.Fatalf("reset failed the existing waiter: %v", err)
+		}
+		copilotMu.Lock()
+		_, cached := copilotSessions["reset"]
+		copilotMu.Unlock()
+		if cached {
+			t.Error("exchange from before reset repopulated the cache")
+		}
+		if _, err := refresh(t.Context(), copilotApp{Token: "reset"}); err != nil {
+			t.Fatal(err)
+		}
+		if calls.Load() != 2 {
+			t.Errorf("exchange after reset: %d calls, want 2", calls.Load())
+		}
+	})
+}
+
 func TestCopilotRefreshHasDeadline(t *testing.T) {
 	copilotRefreshModes(t, func(t *testing.T, refresh func(context.Context, copilotApp) (copilotSession, error)) {
 		var calls atomic.Int32
@@ -224,13 +285,13 @@ func TestCopilotRefreshHasDeadline(t *testing.T) {
 				t.Error("refresh has no deadline")
 				return nil, context.DeadlineExceeded
 			}
-			if left := time.Until(deadline); left <= 0 || left > time.Minute {
+			if left := time.Until(deadline); left <= 0 || left > 31*time.Second {
 				t.Errorf("refresh deadline is %v away", left)
 			}
 			<-r.Context().Done()
 			return nil, r.Context().Err()
 		})
-		if _, err := refresh(timeoutCtx(t, time.Minute), copilotApp{Token: "timed-out"}); err == nil {
+		if _, err := refresh(t.Context(), copilotApp{Token: "timed-out"}); err == nil {
 			t.Error("timed-out exchange returned a session")
 		}
 		synctest.Wait()
