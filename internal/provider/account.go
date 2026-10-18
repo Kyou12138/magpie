@@ -1462,12 +1462,13 @@ func lastRole(body []byte) string {
 }
 
 func copilotToken(ctx context.Context, app copilotApp) (copilotSession, error) {
+	return cachedCopilot(ctx, app.Token, func(ctx context.Context) (copilotSession, error) {
+		return fetchCopilotToken(ctx, app)
+	})
+}
+
+func fetchCopilotToken(ctx context.Context, app copilotApp) (copilotSession, error) {
 	github := app.Token
-	copilotMu.Lock()
-	defer copilotMu.Unlock()
-	if s, ok := copilotSessions[github]; ok && time.Until(time.Unix(s.ExpiresAt, 0)) > 2*time.Minute {
-		return s, nil
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, copilotTokenURL(app.Host), nil)
 	if err != nil {
 		return copilotSession{}, err
@@ -1490,7 +1491,6 @@ func copilotToken(ctx context.Context, app copilotApp) (copilotSession, error) {
 		}
 		return copilotSession{}, errors.New("Copilot is signed out (" + APIError(b, res.Status) + "); sign in to Copilot again")
 	}
-	copilotSessions[github] = s
 	copilotRefusals.Lock()
 	delete(copilotRefusals.at, github)
 	delete(copilotRefusals.status, github)

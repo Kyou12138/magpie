@@ -212,12 +212,13 @@ func copilotSecretTool(path, account string) string {
 // copilotDirect is the session a CLI token makes: the token itself, at the
 // API its account is served from.
 func copilotDirect(ctx context.Context, app copilotApp) (copilotSession, error) {
+	return cachedCopilot(ctx, app.Token, func(ctx context.Context) (copilotSession, error) {
+		return fetchCopilotDirect(ctx, app)
+	})
+}
+
+func fetchCopilotDirect(ctx context.Context, app copilotApp) (copilotSession, error) {
 	github := app.Token
-	copilotMu.Lock()
-	defer copilotMu.Unlock()
-	if s, ok := copilotSessions[github]; ok && time.Until(time.Unix(s.ExpiresAt, 0)) > 2*time.Minute {
-		return s, nil
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, copilotUserURL(app.Host), nil)
 	if err != nil {
 		return copilotSession{}, err
@@ -249,6 +250,5 @@ func copilotDirect(ctx context.Context, app copilotApp) (copilotSession, error) 
 	copilotRefusals.Unlock()
 	s := copilotSession{Token: github, ExpiresAt: time.Now().Add(30 * time.Minute).Unix(), direct: true}
 	s.Endpoints.API = u.Endpoints.API
-	copilotSessions[github] = s
 	return s, nil
 }
